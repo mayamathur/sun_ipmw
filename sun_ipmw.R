@@ -2,36 +2,56 @@
 
 rm(list=ls()) 
 
-# PRELIMINARIES  -------------------------------------------------
 
-library(tidyverse)
-library(mice)
-library(R2jags)
-library(sandwich)
-library(lmtest)
-library(tibble)
+# PRELIMINARIES ---------------------------------------------------------------
 
-options(scipen=999)
+to.load = c("here",
+            "tidyverse",
+            "mice",
+            "R2jags",
+            "sandwich",
+            "lmtest",
+            "tibble")
 
-# also need to source both helper_IAI.R and helper_for_draft_ipmw.R
+# load within installation if needed
+for (pkg in to.load) {
+  
+  cat( paste("\nAbout to try loading package", pkg) )
+  
+  tryCatch({
+    # eval below needed because library() will otherwise be confused
+    # https://www.mitchelloharawild.com/blog/loading-r-packages-in-a-loop/
+    eval( bquote( library( .(pkg) ) ) )
+  }, error = function(err) {
+    install.packages(pkg)
+  })
+}
+
+
+# set working directories
+setwd( here() )
+source("sun_ipmw_helper.R")
+
+# if simulating using IAI code, also need this
+setwd("/Users/mmathur/Dropbox/Personal computer/Independent studies/*Inchoate/2024/2024-10-20 - IAI (Incomplete auxiliaries in imputation)/Simulation study/Code")
+source("helper_IAI.R")
+
 
 
 # GENERATE DIFFERENT DATASETS  -------------------------------------------------
 
 # ~ My own DAG 12B and variations -------------------------------------------------
 
-
-
 sim_obj = sim_data(.p = data.frame(N=10000,
                                    coef_of_interest = "A",
                                    dag_name = "12B" ) )
 
-# WORKS (only 1 incomplete var)
-# if all vars incomplete, results in error: JAGS error: Error in node f[1]
-# Invalid parent values
-outcome = "B1"
-exposure = "A"
-adjustment = c("C1", "D1")
+# # WORKS (only 1 incomplete var)
+# # if all vars incomplete, results in error: JAGS error: Error in node f[1]
+# # Invalid parent values
+# outcome = "B1"
+# exposure = "A"
+# adjustment = c("C1", "D1")
 
 # WORKS
 # # still 2 missingness patterns, but expect NOT to have all weights = 1
@@ -84,11 +104,10 @@ adjustment = c("C1", "D1")
 # adjustment = c("C", "D")
 
 data = sim_obj$du %>% select( all_of( c(exposure, outcome, adjustment) ) )
+head(data)
 
 
-
-
-# # ~ Ross' "simple example" DAG -------------------------------------------------
+# ~ Ross' "simple example" DAG -------------------------------------------------
 # 
 # # YES!! WITH THE RIGHT INITIAL VALS, AGREES WITH HERS.
 # 
@@ -184,211 +203,16 @@ data_with_patterns <- create_pattern_indicators(data, analysis_vars)
 # Print pattern distribution
 message("Distribution of missingness patterns:")
 print(table(data_with_patterns$M))
-# MM: fit the true model to check for extreme coefs (for 12B)
+# sanity check: fit the true model to check for extreme coefs (for 12B)
 # glm( I(M == 2) ~ A1 + B1 + C1 + D1, data = data_with_patterns)
 
 # # Run Bayesian model for missingness patterns
 # message("Running Bayesian model for missingness patterns...")
 # # debug(run_missingness_model)
-# jags_results <- run_missingness_model(data_with_patterns, analysis_vars)
-# jags_results$fit
-# #bm
-
-# ~ ALTERNATE: Run guts of run_missingness_model step by step ----
-# Create pattern indicators if not already present
-# important: alphabetize them to keep a consistent order with make_pattern_indicators below
-vars = sort(analysis_vars)
-
-if (!"M" %in% names(data_with_patterns)) {
-  working_data <- create_pattern_indicators(data_with_patterns, vars)
-} else {
-  working_data = data_with_patterns
-}
-
-# # Make a copy to avoid modifying the original - save for future use in pkg
-# working_data <- data
-
-# Ensure all variables exist, adding dummy columns if needed
-for (v in vars) {
-  if (!v %in% names(working_data)) {
-    working_data[[v]] <- NA
-  }
-}
-
-# Scale variables
-scaled_data <- scale_dataset(working_data, vars)
-
-
-# Get number of patterns
-num_patterns <- length(unique(scaled_data$M))
-message(paste("Number of patterns:", num_patterns))
-
-# Determine which variables are available for each pattern
-vars_per_pattern <- list()
-for (p in 1:num_patterns) {
-  pattern_data <- scaled_data[scaled_data$M == p, ]
-  
-  # Check which variables have non-missing values for this pattern
-  if (nrow(pattern_data) > 0) {
-    observed_vars <- sapply(vars, function(v) {
-      !all(is.na(pattern_data[[v]]))
-    })
-    #bm: added sort here
-    vars_per_pattern[[p]] <- sort(which(observed_vars))
-  } else {
-    vars_per_pattern[[p]] <- integer(0)
-  }
-  
-  message(paste("Pattern", p, "has", length(vars_per_pattern[[p]]), 
-                "observed variables:", 
-                ifelse(length(vars_per_pattern[[p]]) > 0, 
-                       paste(vars_per_pattern[[p]], collapse=", "), 
-                       "none (intercept-only model)")))
-}
-
-
-jags_data <- prepare_jags_data(scaled_data, vars)
-
-# Count parameters per pattern (intercept + coefficients for observed variables)
-var_counts <- sapply(2:num_patterns, function(p) {
-  # Each pattern has at least an intercept
-  1 + length(vars_per_pattern[[p]])
-})
-
-# Calculate total parameters
-total_params <- sum(var_counts)
-message(paste("Total parameters:", total_params))
-
-# Create initial values for 3 chains
-# generalized initialization fn
-# generates one SET of coefficients for each chain
-initialvals2 <- function(numcoeff) {
-  # numcoeff: a numeric vector where each element represents the number of slope coefficients for that group.
-  n_groups <- length(numcoeff)              # Determine the number of groups/patterns.
-
-  #intercepts <- runif(n_groups, min = -4, max = -1)  # Generate one intercept per group.
-  # *** If jags throws "invalid parent values", try making the intercepts more negative
-  #  (maybe need to make them more negative as the number of patterns increases, to keep the complete-case probability from getting too low?)
-  intercepts <- runif(n_groups, min = -5, max = -3)  # Initialize an empty vector for storing the initial values.
-  lim <- 0.06                               # Limit for the slope coefficients.
-  
-  init_values <- c()  # Initialize an empty vector for storing the initial values.
-  
-  # Loop over each group and append its intercept and its slope coefficients.
-  for (i in seq_along(numcoeff)) {
-    group_vals <- c(intercepts[i], runif(numcoeff[i], min = -lim, max = lim))
-    init_values <- c(init_values, group_vals)
-  }
-  
-  return(init_values)
-}
-# calculate the number of slope coeffs for each pattern M>1
-nCoeff = unlist( lapply(vars_per_pattern[2: length(vars_per_pattern)], length) )
-# init has one set of start vals per chain
-nchains = 3  #TEMP: LATER USE AN ARG PASSED TO WRAPPER FN
-init <- lapply(1:nchains, function(i) list(g = initialvals2(nCoeff)))
-
-
-# Create JAGS model
-jags_model_text <- create_jags_model(num_patterns, vars_per_pattern)
-
-# Print model for debugging
-message("JAGS model:")
-cat(jags_model_text)
-
-# Create a temporary file for the JAGS model
-model_file <- tempfile()
-writeLines(jags_model_text, model_file)
-
-# Run JAGS with try-catch to provide better error messages
-jags_fit <- tryCatch({
-  R2jags::jags(
-    data = jags_data,
-    inits = init,
-    n.chains = 3,
-    parameters.to.save = 'g',
-    n.iter = 1000,
-    n.burnin = 500,
-    n.thin = 1,
-    model.file = model_file
-  )
-}, error = function(e) {
-  message("JAGS error: ", e$message)
-  message("Trying a simpler approach...")
-  
-  # If error occurs, try a simpler model with stronger priors
-  simpler_model <- "
-    model {
-      for(i in 1:N) {
-        f[i] ~ dbern(pmiss[i,R[i]])
-        
-        # Fixed probability for each pattern
-        for (p in 2:16) {
-          pmiss[i,p] <- theta[p-1]
-        }
-        
-        # Complete cases probability
-        pmiss[i,1] <- max(0.01, 1 - sum(theta[]))
-      }
-      
-      # Constraint
-      for (j in 1:Nc) {
-        onesc[j] ~ dbern(C[j])
-        C[j] <- step(pmiss[j,1]-c)
-      }
-      
-      # Dirichlet prior on pattern probabilities
-      theta[1:15] ~ ddirch(alpha[])
-    }
-    "
-  writeLines(simpler_model, model_file)
-  
-  # Create alpha parameter for Dirichlet (all 1's for uniform)
-  jags_data$alpha <- rep(1, num_patterns-1)
-  
-  # New init values
-  init_simple <- list(
-    list(theta = rep(1/(num_patterns*2), num_patterns-1)),
-    list(theta = rep(1/(num_patterns*2), num_patterns-1)),
-    list(theta = rep(1/(num_patterns*2), num_patterns-1))
-  )
-  
-  # Try the simpler model
-  tryCatch({
-    R2jags::jags(
-      data = jags_data,
-      inits = init_simple,
-      n.chains = 3,
-      parameters.to.save = 'theta',
-      n.iter = 1000,
-      n.burnin = 500, 
-      n.thin = 1,
-      model.file = model_file
-    )
-  }, error = function(e2) {
-    message("Second attempt also failed: ", e2$message)
-    return(NULL)
-  })
-})
-
-# Clean up the temporary file
-file.remove(model_file)
-
-if (is.null(jags_fit)) {
-  stop("JAGS modeling failed after multiple attempts")
-}
-
-jags_results = list(
-  fit = jags_fit,
-  scaled_data = scaled_data,
-  vars_per_pattern = vars_per_pattern,
-  model_text = jags_model_text
-)
-## END GUTS OF run_missingness_model
-
+jags_results <- run_missingness_model(data_with_patterns, analysis_vars)
 # sanity check
+#@@ for more general implementation, should add checks for convergence (e.g., Rhat, n.eff, etc.)
 jags_results$fit
-
 
 # Reduce dataset to only vars in IPMW model and M indicator
 all_vars = names(data_with_patterns)

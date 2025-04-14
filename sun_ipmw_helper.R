@@ -173,13 +173,17 @@ create_jags_model <- function(num_patterns, vars_per_pattern) {
 #' @param vars Variables for model
 #' @return JAGS fit object
 run_missingness_model <- function(data, vars) {
-  # Create pattern indicators if not already present
-  if (!"M" %in% names(data)) {
-    data <- create_pattern_indicators(data, vars)
+  
+  vars = sort(analysis_vars)
+  
+  if (!"M" %in% names(data_with_patterns)) {
+    working_data <- create_pattern_indicators(data_with_patterns, vars)
+  } else {
+    working_data = data_with_patterns
   }
   
-  # Make a copy to avoid modifying the original
-  working_data <- data
+  # # Make a copy to avoid modifying the original - save for future use in pkg
+  # working_data <- data
   
   # Ensure all variables exist, adding dummy columns if needed
   for (v in vars) {
@@ -205,7 +209,8 @@ run_missingness_model <- function(data, vars) {
       observed_vars <- sapply(vars, function(v) {
         !all(is.na(pattern_data[[v]]))
       })
-      vars_per_pattern[[p]] <- which(observed_vars)
+      #bm: added sort here
+      vars_per_pattern[[p]] <- sort(which(observed_vars))
     } else {
       vars_per_pattern[[p]] <- integer(0)
     }
@@ -217,7 +222,7 @@ run_missingness_model <- function(data, vars) {
                          "none (intercept-only model)")))
   }
   
-  # Prepare JAGS data
+  
   jags_data <- prepare_jags_data(scaled_data, vars)
   
   # Count parameters per pattern (intercept + coefficients for observed variables)
@@ -231,11 +236,34 @@ run_missingness_model <- function(data, vars) {
   message(paste("Total parameters:", total_params))
   
   # Create initial values for 3 chains
-  init <- list(
-    list(g = runif(total_params, -0.1, 0.1)),
-    list(g = runif(total_params, -0.1, 0.1)),
-    list(g = runif(total_params, -0.1, 0.1))
-  )
+  # generalized initialization fn
+  # generates one SET of coefficients for each chain
+  initialvals2 <- function(numcoeff) {
+    # numcoeff: a numeric vector where each element represents the number of slope coefficients for that group.
+    n_groups <- length(numcoeff)              # Determine the number of groups/patterns.
+    
+    #intercepts <- runif(n_groups, min = -4, max = -1)  # Generate one intercept per group.
+    # *** If jags throws "invalid parent values", try making the intercepts more negative
+    #  (maybe need to make them more negative as the number of patterns increases, to keep the complete-case probability from getting too low?)
+    intercepts <- runif(n_groups, min = -5, max = -3)  # Initialize an empty vector for storing the initial values.
+    lim <- 0.06                               # Limit for the slope coefficients.
+    
+    init_values <- c()  # Initialize an empty vector for storing the initial values.
+    
+    # Loop over each group and append its intercept and its slope coefficients.
+    for (i in seq_along(numcoeff)) {
+      group_vals <- c(intercepts[i], runif(numcoeff[i], min = -lim, max = lim))
+      init_values <- c(init_values, group_vals)
+    }
+    
+    return(init_values)
+  }
+  # calculate the number of slope coeffs for each pattern M>1
+  nCoeff = unlist( lapply(vars_per_pattern[2: length(vars_per_pattern)], length) )
+  # init has one set of start vals per chain
+  nchains = 3  #TEMP: LATER USE AN ARG PASSED TO WRAPPER FN
+  init <- lapply(1:nchains, function(i) list(g = initialvals2(nCoeff)))
+  
   
   # Create JAGS model
   jags_model_text <- create_jags_model(num_patterns, vars_per_pattern)
@@ -254,10 +282,8 @@ run_missingness_model <- function(data, vars) {
       data = jags_data,
       inits = init,
       n.chains = 3,
-      #n.chains = 5,  # MM increased (original:3 ) to try to improve convergence
       parameters.to.save = 'g',
       n.iter = 1000,
-      #n.iter = 10000,  # MM edited to try to improve convergence
       n.burnin = 500,
       n.thin = 1,
       model.file = model_file
@@ -328,6 +354,13 @@ run_missingness_model <- function(data, vars) {
     stop("JAGS modeling failed after multiple attempts")
   }
   
+  jags_results = list(
+    fit = jags_fit,
+    scaled_data = scaled_data,
+    vars_per_pattern = vars_per_pattern,
+    model_text = jags_model_text
+  )
+  
   return(list(
     fit = jags_fit,
     scaled_data = scaled_data,
@@ -335,7 +368,6 @@ run_missingness_model <- function(data, vars) {
     model_text = jags_model_text
   ))
 }
-
 
 
 #' Calculate IPMW weights using JAGS results
@@ -572,6 +604,8 @@ fit_outcome_model <- function(weighted_data, outcome, exposure, adjustment = NUL
 }
 
 
+
+# May be out of date: currently running the guts of this
 #' Main function to implement IPMW analysis
 #' @param data Dataset
 #' @param outcome Outcome variable
