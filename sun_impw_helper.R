@@ -218,8 +218,6 @@ run_missingness_model <- function(data, vars) {
   }
   
   # Prepare JAGS data
-  #browser()
-  
   jags_data <- prepare_jags_data(scaled_data, vars)
   
   # Count parameters per pattern (intercept + coefficients for observed variables)
@@ -339,116 +337,11 @@ run_missingness_model <- function(data, vars) {
 }
 
 
-# SIMPLER VERSION WITHOUT THE TRYCATCH
-#' #' Run Bayesian estimation for missingness model 
-#' #' @param data Dataset with pattern indicators
-#' #' @param vars Variables for model
-#' #' @return JAGS fit object
-#' run_missingness_model <- function(data, vars) {
-#'   # Create pattern indicators if not already present
-#'   if (!"M" %in% names(data)) {
-#'     data <- create_pattern_indicators(data, vars)
-#'   }
-#'   
-#'   # Make a copy to avoid modifying the original
-#'   working_data <- data
-#'   
-#'   # Ensure all variables exist, adding dummy columns if needed
-#'   for (v in vars) {
-#'     if (!v %in% names(working_data)) {
-#'       working_data[[v]] <- NA
-#'     }
-#'   }
-#'   
-#'   # Scale variables
-#'   scaled_data <- scale_dataset(working_data, vars)
-#'   
-#'   # Get number of patterns
-#'   num_patterns <- length(unique(scaled_data$M))
-#'   message(paste("Number of patterns:", num_patterns))
-#'   
-#'   # Determine which variables are available for each pattern
-#'   vars_per_pattern <- list()
-#'   for (p in 1:num_patterns) {
-#'     pattern_data <- scaled_data[scaled_data$M == p, ]
-#'     
-#'     # Check which variables have non-missing values for this pattern
-#'     if (nrow(pattern_data) > 0) {
-#'       observed_vars <- sapply(vars, function(v) {
-#'         !all(is.na(pattern_data[[v]]))
-#'       })
-#'       vars_per_pattern[[p]] <- which(observed_vars)
-#'     } else {
-#'       vars_per_pattern[[p]] <- integer(0)
-#'     }
-#'     
-#'     message(paste("Pattern", p, "has", length(vars_per_pattern[[p]]), 
-#'                   "observed variables:", 
-#'                   ifelse(length(vars_per_pattern[[p]]) > 0, 
-#'                          paste(vars_per_pattern[[p]], collapse=", "), 
-#'                          "none (intercept-only model)")))
-#'   }
-#'   
-#'   # Prepare JAGS data
-#'   jags_data <- prepare_jags_data(scaled_data, vars)
-#'   
-#'   # Count parameters per pattern (intercept + coefficients for observed variables)
-#'   var_counts <- sapply(2:num_patterns, function(p) {
-#'     # Each pattern has at least an intercept
-#'     1 + length(vars_per_pattern[[p]])
-#'   })
-#'   
-#'   # Calculate total parameters
-#'   total_params <- sum(var_counts)
-#'   message(paste("Total parameters:", total_params))
-#'   
-#'   # Create initial values for 3 chains
-#'   init <- list(
-#'     list(g = runif(total_params, -0.1, 0.1)),
-#'     list(g = runif(total_params, -0.1, 0.1)),
-#'     list(g = runif(total_params, -0.1, 0.1))
-#'   )
-#'   
-#'   # Create JAGS model
-#'   jags_model_text <- create_jags_model(num_patterns, vars_per_pattern)
-#'   
-#'   # Print model for debugging
-#'   message("JAGS model:")
-#'   cat(jags_model_text)
-#'   
-#'   # Create a temporary file for the JAGS model
-#'   model_file <- tempfile()
-#'   writeLines(jags_model_text, model_file)
-#'   
-#'   # Run JAGS
-#'   jags_fit <- R2jags::jags(
-#'     data = jags_data,
-#'     inits = init,
-#'     n.chains = 3,
-#'     parameters.to.save = 'g',
-#'     n.iter = 1000,
-#'     n.burnin = 500,
-#'     n.thin = 1,
-#'     model.file = model_file
-#'   )
-#'   
-#'   # Clean up the temporary file
-#'   file.remove(model_file)
-#'   
-#'   # Return results
-#'   return(list(
-#'     fit = jags_fit,
-#'     scaled_data = scaled_data,
-#'     vars_per_pattern = vars_per_pattern,
-#'     model_text = jags_model_text
-#'   ))
-#' }
 
-
-# 2025-04-14: NEW version that uses posterior draws of the g's instead of medians
 #' Calculate IPMW weights using JAGS results
 #' @param jags_results Results from run_missingness_model
 #' @param data Original dataset
+#' @param use_posterior_draws If TRUE, draws parameters from the posterior samples themselves. If FALSE, just uses posterior medians.
 #' @return Dataset with IPMW weights
 calculate_ipmw_weights <- function(jags_results, data, use_posterior_draws = TRUE) {
   
@@ -481,7 +374,7 @@ calculate_ipmw_weights <- function(jags_results, data, use_posterior_draws = TRU
   num_patterns <- length(unique(jags_results$scaled_data$M))
   vars_per_pattern <- jags_results$vars_per_pattern
   
-  # DEBUG: Print variable information
+  # Print variable information
   message("Variables in model:")
   print(vars)
   message("Parameter estimates:")
@@ -526,7 +419,6 @@ calculate_ipmw_weights <- function(jags_results, data, use_posterior_draws = TRU
         }
       }
       
-      #browser()
       # Convert to probabilities and take mean over posterior draws
       prob_mat <- plogis(lp_mat)
       pattern_probs[, p - 1] <- colMeans(prob_mat)
@@ -588,16 +480,12 @@ calculate_ipmw_weights <- function(jags_results, data, use_posterior_draws = TRU
     cc_scaled$p1 <- 1 - rowSums(pattern_probs)
   }
   
-  # ### TEMP DEBUGGING - look at rows with extremely low p1
+  # ### TEMP DEBUGGING - look at rows with negative p1
   # #browser()
   # summary(cc_scaled$p1)
-  # x = cc_scaled %>% filter(p1 < 0.002)
+  # x = cc_scaled %>% filter(p1 < 0)
   # ###
   
-  # Ensure probabilities are valid (between 0.001 and 0.999)
-  # MM: Ross doesn't have this, but we have an issue even before this.
-  #cc_scaled$p1 <- pmax(0.001, pmin(0.999, cc_scaled$p1))
-
   
   # Calculate IPMW
   mnum <- mean(data$M == 1, na.rm = TRUE)
@@ -629,138 +517,6 @@ calculate_ipmw_weights <- function(jags_results, data, use_posterior_draws = TRU
 }
 
 
-#' # OLD VERSION that uses medians rather than posterior draws
-#' #' Calculate IPMW weights using JAGS results
-#' #' @param jags_results Results from run_missingness_model
-#' #' @param data Original dataset
-#' #' @return Dataset with IPMW weights
-#' calculate_ipmw_weights <- function(jags_results, data) {
-#'   # Extract parameter estimates (medians)
-#'   g_estimates <- jags_results$fit$BUGSoutput$median$g
-#'   
-#'   # Get complete cases from scaled data
-#'   cc_scaled <- jags_results$scaled_data %>%
-#'     filter(M == 1)
-#'   
-#'   # Get variables used in model
-#'   # MM: this only works if data, as passed to this fn, *only* contains M variables and the vars in PS model
-#'   vars <- names(cc_scaled)[names(cc_scaled) %in% names(data) & 
-#'                              !names(cc_scaled) %in% c("id", "M", paste0("M", 1:16))]
-#'   
-#'   
-#'   # Get number of patterns
-#'   num_patterns <- length(unique(jags_results$scaled_data$M))
-#'   vars_per_pattern <- jags_results$vars_per_pattern
-#'   
-#'   # DEBUG: Print variable information
-#'   message("Variables in model:")
-#'   print(vars)
-#'   message("Parameter estimates:")
-#'   print(g_estimates)
-#'   
-#'   # Initialize pattern probabilities
-#'   pattern_probs <- matrix(0, nrow = nrow(cc_scaled), ncol = num_patterns - 1)
-#'   
-#'   # Parameter index counter
-#'   param_idx <- 1
-#'   
-#'   # For each non-complete pattern, calculate probability
-#'   for (p in 2:num_patterns) {
-#'     # Get intercept parameter
-#'     intercept <- g_estimates[param_idx]
-#'     param_idx <- param_idx + 1
-#'     
-#'     # Initialize linear predictor with intercept
-#'     lp <- rep(intercept, nrow(cc_scaled))
-#'     
-#'     # Add coefficients for variables in this pattern
-#'     if (length(vars_per_pattern[[p]]) > 0) {
-#'       for (v_idx in vars_per_pattern[[p]]) {
-#'         # Get variable name
-#'         var_name <- vars[v_idx]
-#'         
-#'         # Get coefficient
-#'         coef <- g_estimates[param_idx]
-#'         param_idx <- param_idx + 1
-#'         
-#'         # Add to linear predictor
-#'         lp <- lp + coef * cc_scaled[[var_name]]
-#'       }
-#'     }
-#'     
-#'     # Convert to probability
-#'     pattern_probs[, p-1] <- plogis(lp)
-#'     
-#'     # Assign to data frame
-#'     cc_scaled[[paste0("p", p)]] <- plogis(lp)
-#'     
-#'     # Print summary for debugging
-#'     message(paste("Pattern", p, "probability summary:"))
-#'     print(summary(plogis(lp)))
-#'   }
-#'   
-#'   # Calculate p1 (complete case probability)
-#'   # If all pattern probabilities are close to 1, something's wrong
-#'   # Check if this is the case
-#'   if (all(colMeans(pattern_probs) > 0.9)) {
-#'     message("WARNING: All pattern probabilities are very high - likely a calculation error.")
-#'     message("Falling back to empirical frequencies.")
-#'     
-#'     # Use empirical frequencies instead
-#'     emp_freqs <- prop.table(table(jags_results$scaled_data$M))
-#'     for (p in 2:num_patterns) {
-#'       cc_scaled[[paste0("p", p)]] <- emp_freqs[as.character(p)]
-#'     }
-#'     
-#'     # Calculate p1
-#'     cc_scaled$p1 <- emp_freqs["1"]
-#'   } else {
-#'     # Calculate p1 as 1 minus sum of other probabilities
-#'     cc_scaled$p1 <- 1 - rowSums(pattern_probs)
-#'   }
-#'   
-#'   ### TEMP DEBUGGING - look at rows with extremely low p1
-#'   browser()
-#'   summary(cc_scaled$p1)
-#'   x = cc_scaled %>% filter(p1 < 0.002)
-#'   ###
-#'   
-#'   # Ensure probabilities are valid (between 0.001 and 0.999)
-#'   # MM: Ross doesn't have this, but we have an issue even before this.
-#'   cc_scaled$p1 <- pmax(0.001, pmin(0.999, cc_scaled$p1))
-#'   
-#'   
-#' 
-#'   
-#'   
-#'   # Calculate IPMW
-#'   mnum <- mean(data$M == 1, na.rm = TRUE)
-#'   cc_scaled$ipmw <- mnum / cc_scaled$p1
-#'   
-#'   # Trim extreme weights
-#'   if (any(cc_scaled$ipmw > 10)) {
-#'     message("Some weights are large. Trimming at 99th percentile.")
-#'     cc_scaled$ipmw <- pmin(cc_scaled$ipmw, quantile(cc_scaled$ipmw, 0.99))
-#'   }
-#'   
-#'   # Print weight summary
-#'   message("IPMW weight summary:")
-#'   print(summary(cc_scaled$ipmw))
-#'   
-#'   # Merge with original data
-#'   if ("id" %in% names(data)) {
-#'     cc_result <- cc_scaled %>%
-#'       select(id, ipmw, p1) %>%
-#'       right_join(data %>% filter(M == 1), by = "id")
-#'   } else {
-#'     cc_data <- data %>% filter(M == 1)
-#'     cc_data$ipmw <- cc_scaled$ipmw
-#'     cc_data$p1 <- cc_scaled$p1
-#'     cc_result <- cc_data
-#'   }
-#'   
-#'   return(cc_result)
-#' }
 
 #' Fit outcome model using IPMW weights
 #' @param weighted_data Data with IPMW weights
