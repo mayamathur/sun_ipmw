@@ -26,15 +26,14 @@ sim_obj = sim_data(.p = data.frame(N=10000,
                                    coef_of_interest = "A",
                                    dag_name = "12B" ) )
 
-# # WORKS (only 1 incomplete var)
-# # if all vars incomplete, results in error: JAGS error: Error in node f[1]
-# # Invalid parent values
-# outcome = "B"
-# exposure = "A1"
-# adjustment = c("C", "D")  
-# #
+# WORKS (only 1 incomplete var)
+# if all vars incomplete, results in error: JAGS error: Error in node f[1]
+# Invalid parent values
+outcome = "B1"
+exposure = "A"
+adjustment = c("C1", "D1")
 
-# # 2025-04-14: Works now!!
+# WORKS
 # # still 2 missingness patterns, but expect NOT to have all weights = 1
 # # in particular, D predicts RC
 # # here, the issue is that complete cases get extreme wts (362!)
@@ -78,13 +77,13 @@ sim_obj = sim_data(.p = data.frame(N=10000,
 # exposure = "A"
 # adjustment = "D"
 
-# ****BREAKS!!
-# 4 incomplete vars
-data = sim_obj$du %>% select(A, B, C, D)
-outcome = "B"
-exposure = "A"
-adjustment = c("C", "D")
+# # **NOW WORKS WITH LOWER START VALUES FOR INTERCEPTS
+# # 4 incomplete vars
+# outcome = "B"
+# exposure = "A"
+# adjustment = c("C", "D")
 
+data = sim_obj$du %>% select( all_of( c(exposure, outcome, adjustment) ) )
 
 
 
