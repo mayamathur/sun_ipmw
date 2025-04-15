@@ -174,12 +174,12 @@ create_jags_model <- function(num_patterns, vars_per_pattern) {
 #' @return JAGS fit object
 run_missingness_model <- function(data, vars) {
   
-  vars = sort(analysis_vars)
+  vars = sort(vars)
   
-  if (!"M" %in% names(data_with_patterns)) {
-    working_data <- create_pattern_indicators(data_with_patterns, vars)
+  if (!"M" %in% names(data)) {
+    working_data <- create_pattern_indicators(data, vars)
   } else {
-    working_data = data_with_patterns
+    working_data = data
   }
   
   # # Make a copy to avoid modifying the original - save for future use in pkg
